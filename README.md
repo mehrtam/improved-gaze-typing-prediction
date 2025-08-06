@@ -107,6 +107,9 @@ Stage 2: Character Prediction per Finger
 Finger 1: Accuracy = 0.7153
 Finger 2: Accuracy = 0.6529
 ...
+
+
+
 🛠 Technologies Used
 Python, NumPy, Pandas
 
