@@ -1,122 +1,135 @@
-👁️‍🗨️ Improved Gaze-Typing Prediction Pipeline
-This project implements a two-stage deep learning pipeline for predicting typed characters based on gaze and hand-tracking data. Using Bidirectional LSTMs, the model first infers the finger used for typing and then classifies the intended key press. It supports advanced feature engineering, 3D normalization, and robust leave-one-out cross-validation (LOOCV) across participants.
+# Improved Gaze-Typing Prediction Pipeline
 
-🧠 Project Structure
-🔍 Stage 1: Finger Prediction
-Predicts which finger was used for typing based on:
+A two-stage deep learning pipeline that predicts typed characters from synchronized eye-gaze and hand-tracking data. The model first infers which finger executed a keypress, then uses that inference as an architectural prior to constrain a per-finger character classifier. Evaluated with leave-one-subject-out cross-validation across 5 participants.
 
-Hand tip positions (normalized to wrist center)
+## Why two stages?
 
-Velocity of wrist movement
+A direct gaze-and-hand → character classifier has to discriminate between 26 outputs from a single noisy multimodal signal. The first-stage finger prediction narrows the per-finger output space to the 3–6 keys typically struck by that finger, which gives the second-stage classifier a substantially smaller and more tractable problem. Stage 1 is therefore acting as a learned **architectural prior** — not a separate downstream task, but a constraint that conditions character classification.
 
-Delta (temporal) movement features
+## Architecture
 
-🔤 Stage 2: Character Prediction
-Once a finger is inferred, a second model is trained to classify the exact character pressed, using:
+```mermaid
+flowchart TD
+    Data["Raw multimodal data<br/>gaze · hand kinematics · keypress"] --> Pre["Preprocessing<br/>interpolation, wrist-centered normalization"]
+    Pre --> Feat["Feature engineering<br/>positions, velocities, deltas, distances"]
 
-Gaze-to-key distances
+    Feat --> S1["Stage 1: BiLSTM<br/>finger predictor"]
+    S1 --> Finger["Predicted finger"]
 
-Finger-to-key distances
+    Finger --> S2["Stage 2: per-finger BiLSTM<br/>character predictor"]
+    Feat --> S2
+    S2 --> Char["Predicted character"]
+```
 
-Temporal movement deltas
+**Stage 1 — Finger predictor.** Input: normalized fingertip and wrist positions, wrist velocity, temporal delta features. Output: inferred press-finger. Architecture: `Masking → BiLSTM(128, return_sequences=True) → Dropout(0.2) → BiLSTM(64) → Dropout(0.2) → Dense(softmax)`.
 
-Wrist velocity
+**Stage 2 — Character predictor.** One per-finger model. Input: normalized hand kinematics + gaze-to-key distances + finger-to-key distances + temporal deltas + wrist velocity. Same BiLSTM architecture as Stage 1, with the output space narrowed to the keys observed for that finger cluster.
 
-📁 Input Data
-Format
-Compressed .rar files per participant
+## Feature engineering
 
-Each contains .csv logs with columns like:
+| Feature group | Description |
+|---|---|
+| Wrist-centered normalization | All 3D positions re-centered each frame on the average of the two wrist roots, removing absolute hand position from the signal |
+| Temporal deltas | Frame-to-frame differences for each kinematic feature |
+| Wrist velocity | Magnitude of wrist movement per frame |
+| Gaze-to-key distance | Euclidean distance from current gaze hit to each key center |
+| Finger-to-key distance | Distance from each fingertip to each key center |
 
-PressedLetter, CurrentLetter
+## Evaluation protocol
 
-LeftGazeHit, LeftGazeHitPosition_X, ...
+**Leave-one-subject-out cross-validation** across 5 participants. For each fold, four participants form the training set and the held-out participant is the test set. This measures *cross-user generalization* — how the model performs on a typist it has never seen — rather than within-user performance, which is the more relevant metric for any deployed system targeting new users.
 
-Left_Hand_ThumbTip_X, Right_Hand_WristRoot_Y, ...
+Per-fold class weights handle imbalance; early stopping on validation loss (patience 5) prevents overfitting on smaller folds.
 
-Key_Q_X, Key_Q_Y, Key_Q_Z, etc.
+## Results
 
-⚙️ Installation & Setup
-bash
-Copy
-Edit
-# 1. Clone this repository
-git clone https://github.com/yourusername/gaze-typing-pipeline.git
+**Stage 1 — Finger prediction (LOOCV across 5 participants):** **84.21%** average accuracy.
 
-# 2. Install dependencies
+**Stage 2 — Character prediction per inferred finger cluster (LOOCV):**
+
+| Finger cluster | Accuracy |
+|---|---|
+| Finger 1 | 71.53% |
+| Finger 2 | 65.29% |
+| ... | _(remaining clusters: see classification reports printed by the script)_ |
+
+> A confusion matrix and per-finger accuracy plot will be added to `figures/` in a future commit.
+
+## Repository structure
+
+```
+improved-gaze-typing-prediction/
+├── improved_gaze_typing_prediction_pipeline.py   # full two-stage pipeline
+├── requirements.txt
+├── LICENSE                                        # MIT
+└── README.md
+```
+
+## Installation
+
+```bash
+git clone https://github.com/mehrtam/improved-gaze-typing-prediction.git
+cd improved-gaze-typing-prediction
 pip install -r requirements.txt
 
-# 3. Install additional tools for RAR extraction
+# RAR extraction tool (Linux / Colab)
 sudo apt-get install unrar -y
-pip install rarfile
-▶️ How to Run
-Step 1: Extract Participant Data
-python
-Copy
-Edit
-# Automatically unpacks .rar files into /content/extracted_participants/
-extract_rar_files(rar_files, base_extract_dir)
-Step 2: Preprocess and Normalize Features
-python
-Copy
-Edit
-df = load_and_preprocess_data("/content/extracted_participants")
-Step 3: Run Evaluation
-python
-Copy
-Edit
-# Finger prediction
-run_loocv_evaluation(df, stage1_features, 'InferredPressedFinger', "Stage 1")
+```
 
-# Character prediction within each finger cluster
-run_loocv_evaluation(df_clustered, stage2_features, 'PressedLetter', "Stage 2")
-🧮 Features Engineered
-Dynamic Normalization: Origin set to average wrist root per frame
+## Data format
 
-Gaze Hit Calculation: Uses valid left/right gaze hit detection
+Per-participant `.rar` archives containing `.csv` logs. Each CSV must include:
 
-Delta Features: Time-series change per feature
+- **Gaze:** `LeftGazeHit`, `LeftGazeHitPosition_X/Y/Z`, `RightGazeHit`, `RightGazeHitPosition_X/Y/Z`
+- **Hand kinematics:** `Left_Hand_<Joint>_X/Y/Z`, `Right_Hand_<Joint>_X/Y/Z` for joints including `WristRoot`, `IndexTip`, `ThumbTip`, and other tracked joints
+- **Keyboard layout:** `Key_<Letter>_X/Y/Z` for each key
+- **Keypress:** `PressedLetter`, `CurrentLetter`, `Phrase`, `ParticipantID`, `TrialNumber`, `LetterIndex`, `ms` (timestamp)
 
-Kinematics: Wrist velocity
+## Running the pipeline
 
-Distances:
+```python
+from improved_gaze_typing_prediction_pipeline import (
+    extract_rar_files, load_and_preprocess_data, run_loocv_evaluation
+)
 
-Gaze-to-key
+# 1. Extract per-participant archives
+extract_rar_files(rar_files, base_extract_dir="/path/to/extracted_participants")
 
-Finger-to-key
+# 2. Load CSVs and run feature engineering
+df = load_and_preprocess_data("/path/to/extracted_participants")
 
-Finger-to-gaze
+# 3. Stage 1 — Finger prediction
+run_loocv_evaluation(df, stage1_features, "InferredPressedFinger", "Stage 1")
 
-📊 Evaluation Method
-Leave-One-Out Cross-Validation (LOOCV) is performed:
+# 4. Stage 2 — Character prediction (one model per inferred finger)
+for finger_id in df["InferredPressedFinger"].unique():
+    run_loocv_evaluation(
+        df[df["InferredPressedFinger"] == finger_id],
+        stage2_features, "PressedLetter", f"Stage 2: Finger {finger_id}"
+    )
+```
 
-Across participants for generalizability
+The script prints fold-level accuracy and full classification reports for both stages.
 
-With dynamic class weights for imbalance
+## Tech stack
 
-Using classification reports and accuracy
+Python · TensorFlow / Keras (Bidirectional LSTM with masking) · scikit-learn (LOOCV, metrics, label encoding) · pandas · NumPy · rarfile
 
-📈 Sample Output
-plaintext
-Copy
-Edit
-Stage 1: Finger Prediction
-Average Accuracy: 0.8421
+## Applications
 
-Stage 2: Character Prediction per Finger
-Finger 1: Accuracy = 0.7153
-Finger 2: Accuracy = 0.6529
-...
+Multimodal text entry · accessibility input methods · AR/VR text-input optimization · cognitive and HCI research on gaze–motor coordination during typing.
 
+## Citation
 
+If you build on this work, please reference:
 
-🛠 Technologies Used
-Python, NumPy, Pandas
+> Eslami, F. (2025). *Improved Gaze-Typing Prediction with Two-Stage BiLSTMs and LOOCV* [Computer software]. https://github.com/mehrtam/improved-gaze-typing-prediction
 
-TensorFlow / Keras (Bidirectional LSTM)
+## Contact
 
-scikit-learn (LOOCV, metrics)
+**Fateme (Mehrta) Eslami** — University of Birmingham
+[GitHub](https://github.com/mehrtam) · [LinkedIn](https://www.linkedin.com/in/fateme-eslami-014179219/)
 
-Google Colab for prototyping
+## License
 
-RAR extraction with rarfile + unrar
+MIT — see [LICENSE](LICENSE).
